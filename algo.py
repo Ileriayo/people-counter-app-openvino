@@ -20,8 +20,8 @@ MQTT_KEEPALIVE_INTERVAL = 60
 
 INPUT_STREAM = "resources/Pedestrian_Detect_2_1_1.mp4"
 CPU_EXTENSION = None
-MODEL = "samples/model/IR/ssd_inception_v2_coco_2018_01_28/ssd_inception_v2_coco_2018_01_28.xml"
-# MODEL = "samples/model/IR/person-detection-retail-0013/FP16-INT8/person-detection-retail-0013.xml"
+# MODEL = "samples/model/IR/ssd_inception_v2_coco_2018_01_28/ssd_inception_v2_coco_2018_01_28.xml"
+MODEL = "samples/model/IR/person-detection-retail-0013/FP16-INT8/person-detection-retail-0013.xml"
 
 def build_argparser():
     parser = ArgumentParser()
@@ -39,22 +39,28 @@ def build_argparser():
                              "CPU, GPU, FPGA or MYRIAD is acceptable. Sample "
                              "will look for a suitable plugin for device "
                              "specified (CPU by default)")
-    parser.add_argument("-pt", "--prob_threshold", type=float, default=0.4,
+    parser.add_argument("-pt", "--prob_threshold", type=float, default=0.5,
                         help="Probability threshold for detections filtering"
                         "(0.5 by default)")
     return parser
 
 
 def draw_bounding_boxes(frame, result, args, width, height):
+    """
+    Draw bounding boxes based on model detections
+    for specified confidence thresholds (default is 50%).
+    """
     person_count = 0
     for box in result[0][0]:
         conf = box[2]
+        # draw boxes for detections above 50%
         if conf >= args.prob_threshold:
             xmin = int(box[3] * width)
             ymin = int(box[4] * height)
             xmax = int(box[5] * width)
             ymax = int(box[6] * height)
             cv2.rectangle(frame, (xmin, ymin), (xmax, ymax), (0, 0, 255), 1)
+            # new object has been detected
             person_count += 1
     return frame, person_count
 
@@ -81,9 +87,9 @@ def infer_on_stream(args):
     total = 0
     start_time = 0
     duration = 0
-    fluc_count = 0
     prev_person_count = 0
     frame_id = 0
+    frame_tracker = 0
 
     cap = cv2.VideoCapture(args.input)
     cap.open(args.input)
@@ -115,37 +121,31 @@ def infer_on_stream(args):
                     break
 
                 result = infer_network.get_output()
-                
                 frame, person_count = draw_bounding_boxes(frame, result, args, width, height)
 
-                # Reset frame counter on every fluctuation in detection
-                if person_count != prev_person_count:
-                    fluc_count += 1
-                    frame_id = 0
-
-                # True positive if new person detection lasts at least 44 frames 
-                if person_count > 0:
+                # for every new detection increase the total count
+                if person_count > prev_person_count:
                     start_time = time.time()
-                    fluc_count = 0
-                    if frame_id == 44:
-                        client.publish("person", json.dumps({"total": total}))
-                        total = total + person_count - prev_person_count
-                        
-                        # duration = time.time() - start_time
-                        ## for some reason this has to be here for the total to be published correctly
-                        client.publish("person/duration", json.dumps({"duration": duration}))
-                        # cv2.putText(frame, 'Total Count: {}'.format(total), (0, 70), cv2.FONT_HERSHEY_COMPLEX_SMALL, 1.1, (0, 0, 255), 2)
+                    total = total + person_count
+                    client.publish("person", json.dumps({"total": total}))
+                    # keep track of frame at the point of detection
+                    frame_tracker = frame_id
 
-                if person_count < 1 and frame_id < 20:
-                    duration = time.time() - start_time
+                # if person is detected in the next 5 frames,
+                # there was a fluctuation, hence treat as false negative
+                # otherwise, person has exited the frame
+                if person_count < prev_person_count and frame_id - frame_tracker > 5:
+                    duration = int(time.time() - start_time)
+                    client.publish("person/duration", json.dumps({"duration": duration}))
 
+                # keep track of previous count detected
                 prev_person_count = person_count
-
-                cv2.putText(frame, 'Person(s) In Frame: {}'.format(person_count), (0, 30), cv2.FONT_HERSHEY_COMPLEX_SMALL, 1.1, (0, 0, 255), 2)
-                cv2.putText(frame, 'Frame ID: {}'.format(frame_id), (0, 110), cv2.FONT_HERSHEY_COMPLEX_SMALL, 1.1, (0, 0, 255), 2)
-                
                 client.publish("person", json.dumps({"count": person_count}))
 
+                cv2.putText(frame, 'Person(s) In Frame: {}'.format(person_count), (0, 30), cv2.FONT_HERSHEY_COMPLEX_SMALL, 0.9, (0, 0, 255), 2)
+                cv2.putText(frame, 'Duration of Previous Person: {}'.format(duration), (0, 70), cv2.FONT_HERSHEY_COMPLEX_SMALL, 0.9, (0, 0, 255), 2)
+                cv2.putText(frame, 'Total Frames Processed: {}'.format(frame_id), (0, 110), cv2.FONT_HERSHEY_COMPLEX_SMALL, 0.9, (0, 0, 255), 2)
+                
             sys.stdout.buffer.write(frame)  
             sys.stdout.flush()
 
